@@ -5,11 +5,11 @@ import { Button } from '@/components/ui/button'
 import { loginIdentifierToEmail } from '@/lib/auth-email'
 import { supabase } from '@/lib/supabase'
 
-/** Maps Supabase OTP errors to reviewer-friendly copy (unknown email + shouldCreateUser: false). */
+/** Maps OTP “unknown user” errors to friendly copy (shouldCreateUser: false). */
 function friendlyOtpError(message: string): string {
   const lower = message.toLowerCase()
   if (lower.includes('signups not allowed') || lower.includes('user not found')) {
-    return 'No account exists for this email. Your administrator must invite you or create your user in Supabase first.'
+    return 'No account for this email. Ask your administrator for access.'
   }
   return message
 }
