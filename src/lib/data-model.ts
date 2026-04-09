@@ -10,7 +10,7 @@ export const SUPABASE_BUCKETS = {
 
 export const SUPABASE_FOLDERS = {
   notReviewed: 'NotReviewed',
-  reviewCorrections: 'ReviewCorrections',
+  reviewCorrections: 'Reviewed',
 } as const
 
 export function getCaseImageStoragePath(caseId: string, fileName: string): string {

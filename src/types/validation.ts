@@ -30,9 +30,12 @@ export type DentalCaseDocument = {
   imageBucket: string
   imagePath: string
   imagePublicUrl?: string
+  annotatedImageUrl?: string
   source: 'intraoral' | 'tooth' | 'other'
   originalAnnotations: CariesPolygon[]
   status: CaseStatus
+  assignedReviewerEmail?: string
+  reviewedAt?: string
   createdAt: string
   updatedAt: string
 }
@@ -41,6 +44,7 @@ export type CaseReviewDocument = {
   reviewId: string
   caseId: string
   reviewerId: string
+  reviewerEmail: string
   reviewerName?: string
   decision: ValidationDecision
   comment?: string

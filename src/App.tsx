@@ -1,3 +1,4 @@
+import type { Session } from '@supabase/supabase-js'
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import {
   collection,
@@ -9,10 +10,14 @@ import {
   updateDoc,
 } from 'firebase/firestore'
 
+import { CheckCircle2, Loader2 } from 'lucide-react'
+
+import { LoginPage } from '@/components/LoginPage'
 import { Button } from '@/components/ui/button'
 import { COLLECTIONS, SUPABASE_BUCKETS } from '@/lib/data-model'
 import { db } from '@/lib/firebase'
 import { getPublicImageUrl, uploadCorrectionOverlayBlob } from '@/lib/image-storage'
+import { supabase } from '@/lib/supabase'
 import type {
   CaseReviewDocument,
   CorrectionRegion,
@@ -25,11 +30,20 @@ type CaseRecord = {
   data: DentalCaseDocument
 }
 
+type ReviewRecord = {
+  docId: string
+  data: CaseReviewDocument
+}
+
 type DrawTool = 'draw' | 'erase'
 
 function App() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [authReady, setAuthReady] = useState(false)
+
   const [cases, setCases] = useState<CaseRecord[]>([])
-  const [activeCase, setActiveCase] = useState<CaseRecord | null>(null)
+  const [reviewsByCaseId, setReviewsByCaseId] = useState<Record<string, ReviewRecord[]>>({})
+  const [activeIndex, setActiveIndex] = useState(0)
   const [decision, setDecision] = useState<ValidationDecision | null>(null)
   const [comment, setComment] = useState('')
   const [drawnRegions, setDrawnRegions] = useState<CorrectionRegion[]>([])
@@ -41,31 +55,67 @@ function App() {
   const [cursorPoint, setCursorPoint] = useState<{ x: number; y: number } | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [message, setMessage] = useState<string>('')
+  const [isQueueLoading, setIsQueueLoading] = useState(false)
   const imageRef = useRef<HTMLImageElement | null>(null)
   const imageContainerRef = useRef<HTMLDivElement | null>(null)
 
   async function loadCases() {
     const casesQuery = query(collection(db, COLLECTIONS.cases), orderBy('createdAt', 'desc'))
     const snapshot = await getDocs(casesQuery)
-    const result = snapshot.docs.map((item) => ({
+    const caseRecords = snapshot.docs.map((item) => ({
       docId: item.id,
       data: item.data() as DentalCaseDocument,
     }))
-    setCases(result)
-  }
 
-  function pickRandomCase(pool: CaseRecord[]) {
-    if (pool.length === 0) {
-      setActiveCase(null)
-      return
-    }
-    const index = Math.floor(Math.random() * pool.length)
-    setActiveCase(pool[index])
+    const reviewLists = await Promise.all(
+      caseRecords.map(async (caseRecord) => {
+        const reviewSnapshot = await getDocs(
+          collection(db, COLLECTIONS.cases, caseRecord.docId, COLLECTIONS.reviews),
+        )
+        const reviews = reviewSnapshot.docs.map((reviewDoc) => ({
+          docId: reviewDoc.id,
+          data: reviewDoc.data() as CaseReviewDocument,
+        }))
+        return [caseRecord.docId, reviews] as const
+      }),
+    )
+
+    // Set together so Total Reviewed never briefly sees cases without review data (looked like 0).
+    setCases(caseRecords)
+    setReviewsByCaseId(Object.fromEntries(reviewLists))
   }
 
   useEffect(() => {
-    void loadCases()
+    void supabase.auth.getSession().then(({ data: { session: initialSession } }) => {
+      setSession(initialSession)
+      setAuthReady(true)
+    })
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+    })
+    return () => subscription.unsubscribe()
   }, [])
+
+  useEffect(() => {
+    if (!session) {
+      setIsQueueLoading(false)
+      return
+    }
+    let cancelled = false
+    setIsQueueLoading(true)
+    void loadCases()
+      .catch(() => {
+        /* loadCases errors surface via submit message; queue still needs to unblock */
+      })
+      .finally(() => {
+        if (!cancelled) setIsQueueLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [session])
 
   useEffect(() => {
     if (decision === 'no') {
@@ -73,10 +123,28 @@ function App() {
     }
   }, [decision])
 
-  const pendingCases = useMemo(
-    () => cases.filter((item) => item.data.status !== 'validated'),
-    [cases],
-  )
+  const reviewerEmail = session?.user.email?.toLowerCase() ?? ''
+  function canReviewerSeeCase(caseDocId: string, email: string): boolean {
+    if (!email) return false
+    const reviews = reviewsByCaseId[caseDocId] ?? []
+    if (reviews.length === 0) return true
+    return reviews.some((review) => review.data.reviewerEmail?.toLowerCase() === email)
+  }
+
+  const visibleCases = useMemo(() => {
+    if (!reviewerEmail) return []
+    return cases.filter((item) => canReviewerSeeCase(item.docId, reviewerEmail))
+  }, [cases, reviewsByCaseId, reviewerEmail])
+
+  const reviewedCount = useMemo(() => {
+    if (!reviewerEmail) return 0
+    return cases.filter((item) => {
+      const reviews = reviewsByCaseId[item.docId] ?? []
+      return reviews.some((review) => review.data.reviewerEmail?.toLowerCase() === reviewerEmail)
+    }).length
+  }, [cases, reviewsByCaseId, reviewerEmail])
+
+  const activeCase = visibleCases[activeIndex] ?? null
 
   const activeImageUrl = useMemo(() => {
     if (!activeCase) return ''
@@ -242,15 +310,45 @@ function App() {
     setCursorPoint(null)
   }
 
+  function resetTransientEditorState() {
+    setIsDrawing(false)
+    setDraftStroke([])
+    setCursorPoint(null)
+    setMessage('')
+  }
+
+  function goToCaseByOffset(offset: number) {
+    resetTransientEditorState()
+    setActiveIndex((prev) => {
+      if (visibleCases.length === 0) return 0
+      const next = prev + offset
+      if (next < 0) return 0
+      if (next >= visibleCases.length) return visibleCases.length - 1
+      return next
+    })
+  }
+
+  function moveToNextCase() {
+    goToCaseByOffset(1)
+  }
+
+  function moveToPreviousCase() {
+    goToCaseByOffset(-1)
+  }
+
   async function submitReview(nextDecision: ValidationDecision) {
-    if (!activeCase) return
+    if (!activeCase || !session?.user) return
 
     setIsSubmitting(true)
     setMessage('')
 
     try {
-      const reviewId = crypto.randomUUID()
+      const reviewId = session.user.id
       const now = new Date().toISOString()
+      const userEmail = session.user.email?.toLowerCase()
+      if (!userEmail) {
+        throw new Error('Signed-in user does not have an email.')
+      }
       let correctionUploadPath: string | undefined
       let correctionUploadUrl: string | undefined
 
@@ -269,17 +367,24 @@ function App() {
         correctionUploadUrl = uploaded.publicUrl
       }
 
+      const displayName =
+        typeof session.user.user_metadata?.display_name === 'string'
+          ? session.user.user_metadata.display_name
+          : undefined
+
+      const trimmedComment = comment.trim()
       const reviewDoc: CaseReviewDocument = {
         reviewId,
         caseId: activeCase.data.caseId,
-        reviewerId: 'demo-reviewer',
-        reviewerName: 'Demo Reviewer',
+        reviewerId: session.user.id,
+        reviewerEmail: userEmail,
+        reviewerName: displayName ?? session.user.email?.split('@')[0] ?? 'Reviewer',
         decision: nextDecision,
-        comment: comment || undefined,
-        correctionUploadPath,
-        correctionUploadUrl,
         corrections: nextDecision === 'no' ? drawnRegions : [],
         submittedAt: now,
+        ...(trimmedComment ? { comment: trimmedComment } : {}),
+        ...(correctionUploadPath ? { correctionUploadPath } : {}),
+        ...(correctionUploadUrl ? { correctionUploadUrl } : {}),
       }
 
       const reviewRef = doc(
@@ -293,7 +398,11 @@ function App() {
 
       await updateDoc(doc(db, COLLECTIONS.cases, activeCase.docId), {
         status: 'validated',
+        assignedReviewerEmail: userEmail,
+        annotatedImageUrl: correctionUploadUrl ?? null,
+        lastReviewDecision: nextDecision,
         updatedAt: now,
+        reviewedAt: now,
       })
 
       setDecision(null)
@@ -302,8 +411,7 @@ function App() {
       setMessage(`Saved "${nextDecision.toUpperCase()}" for case ${activeCase.data.caseId}.`)
 
       await loadCases()
-      const remaining = pendingCases.filter((item) => item.docId !== activeCase.docId)
-      pickRandomCase(remaining)
+      moveToNextCase()
     } catch (error) {
       const text = error instanceof Error ? error.message : 'Submission failed.'
       setMessage(text)
@@ -366,38 +474,134 @@ function App() {
     return blob
   }
 
-  return (
-    <main className="mx-auto max-w-5xl space-y-6 p-6">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold">Dental Caries Annotation Validation Platform</h1>
-        <p className="text-sm text-muted-foreground">
-          Existing images are reviewed case-by-case. Select Yes/No and submit to Firestore.
-        </p>
-      </header>
+  useEffect(() => {
+    setActiveIndex((prev) => {
+      if (visibleCases.length === 0) return 0
+      if (prev >= visibleCases.length) return visibleCases.length - 1
+      return prev
+    })
+  }, [visibleCases])
 
-      <section className="space-y-4 rounded-lg border p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-lg font-medium">Validation Queue</h2>
-          <Button
-            onClick={() => pickRandomCase(pendingCases)}
-            disabled={pendingCases.length === 0 || isSubmitting}
-          >
-            Random Case
+  useEffect(() => {
+    if (!activeCase || !reviewerEmail) {
+      setDecision(null)
+      setComment('')
+      setDrawnRegions([])
+      return
+    }
+
+    const reviews = reviewsByCaseId[activeCase.docId] ?? []
+    const ownReview = reviews.find(
+      (review) => review.data.reviewerEmail?.toLowerCase() === reviewerEmail,
+    )
+    if (!ownReview) {
+      setDecision(null)
+      setComment('')
+      setDrawnRegions([])
+      return
+    }
+
+    setDecision(ownReview.data.decision)
+    setComment(ownReview.data.comment ?? '')
+    setDrawnRegions(ownReview.data.corrections ?? [])
+  }, [activeCase, reviewsByCaseId, reviewerEmail])
+
+  if (!authReady) {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-6">
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      </main>
+    )
+  }
+
+  if (!session) {
+    return <LoginPage />
+  }
+
+  return (
+    <main className="min-h-screen bg-gradient-to-b from-muted/50 via-background to-background">
+      <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 sm:px-6">
+      <header className="flex flex-wrap items-start justify-between gap-6 rounded-2xl border bg-card/80 p-6 shadow-sm backdrop-blur-sm ring-1 ring-border/60">
+        <div className="space-y-2">
+          <h1 className="text-balance text-2xl font-semibold tracking-tight">
+            Dental Caries Annotation Validation
+          </h1>
+          <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
+            Verify each case with Yes or No. Corrections use red and green strokes on the image.
+          </p>
+        </div>
+        <div className="flex flex-col items-stretch gap-3 sm:items-end">
+          <span className="max-w-[260px] truncate rounded-lg bg-muted/60 px-3 py-1.5 text-xs text-muted-foreground sm:max-w-xs">
+            {session.user.email}
+          </span>
+          <Button variant="outline" size="sm" onClick={() => void supabase.auth.signOut()}>
+            Log out
           </Button>
         </div>
-        <p className="text-sm text-muted-foreground">
-          Pending cases: {pendingCases.length} / Total cases: {cases.length}
-        </p>
+      </header>
+
+      <section className="rounded-2xl border bg-card p-6 shadow-sm ring-1 ring-border/60">
+        <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+            <CheckCircle2 className="h-7 w-7" strokeWidth={1.75} aria-hidden />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-muted-foreground">Total Reviewed</p>
+            <p className="mt-0.5 text-4xl font-semibold tabular-nums tracking-tight text-foreground">
+              {isQueueLoading ? (
+                <span className="text-muted-foreground/80" aria-busy="true" aria-label="Loading count">
+                  —
+                </span>
+              ) : (
+                reviewedCount
+              )}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Cases you have submitted a validation for
+            </p>
+          </div>
+        </div>
       </section>
 
-      <section className="space-y-4 rounded-lg border p-4">
-        {!activeCase ? (
+      <section className="space-y-5 rounded-2xl border bg-card p-6 shadow-sm ring-1 ring-border/60">
+        {isQueueLoading ? (
+          <div
+            className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground"
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+          >
+            <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden />
+            <p className="text-sm">Loading cases…</p>
+          </div>
+        ) : !activeCase ? (
           <p className="text-sm text-muted-foreground">
-            Click <strong>Random Case</strong> to start validation.
+            No cases available for your account.
           </p>
         ) : (
           <>
-            <p className="text-sm text-muted-foreground">Case ID: {activeCase.data.caseId}</p>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 pb-4">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Current case
+                </p>
+                <p className="mt-1 font-mono text-sm font-medium text-foreground">
+                  {activeCase.data.caseId}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={moveToPreviousCase} disabled={activeIndex === 0}>
+                  Previous
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={moveToNextCase}
+                  disabled={activeIndex >= visibleCases.length - 1}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
             {decision === 'no' ? (
               <div className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2">
                 <span className="text-sm text-muted-foreground">Tool:</span>
@@ -460,7 +664,7 @@ function App() {
             {activeImageUrl ? (
               <div
                 ref={imageContainerRef}
-                className="relative max-h-[420px] w-full select-none overflow-hidden rounded-md border touch-none"
+                className="relative max-h-[420px] w-full select-none overflow-hidden rounded-xl border border-border/80 bg-muted/30 shadow-inner touch-none ring-1 ring-black/[0.03] dark:ring-white/[0.06]"
                 onPointerDown={handleDrawStart}
                 onPointerMove={handleDrawMove}
                 onPointerUp={handleDrawEnd}
@@ -541,7 +745,7 @@ function App() {
               </div>
             )}
 
-            <div className="space-y-2">
+            <div className="space-y-3 rounded-xl border border-border/60 bg-muted/20 p-4">
               <p className="text-base font-medium">Is this caries annotation correct?</p>
               <div className="flex gap-2">
                 <Button
@@ -566,7 +770,7 @@ function App() {
             ) : null}
 
             {decision === 'no' ? (
-              <div className="space-y-3 rounded-md border p-3">
+              <div className="space-y-3 rounded-xl border border-border/60 bg-muted/10 p-4">
                 <p className="text-sm font-medium">
                   Hand-draw correction strokes directly on the image (required for "No")
                 </p>
@@ -580,7 +784,7 @@ function App() {
                   placeholder="Optional dentist comment"
                   value={comment}
                   onChange={(event) => setComment(event.target.value)}
-                  className="min-h-24 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                  className="min-h-24 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                 />
                 <div className="flex gap-2">
                   <Button
@@ -603,7 +807,12 @@ function App() {
         )}
       </section>
 
-      {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
+      {message ? (
+        <p className="rounded-lg border border-border/60 bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+          {message}
+        </p>
+      ) : null}
+      </div>
     </main>
   )
 }
