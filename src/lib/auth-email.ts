@@ -1,6 +1,6 @@
 /**
- * Supabase `signInWithPassword` expects an email. Optional `VITE_AUTH_EMAIL_DOMAIN`
- * lets reviewers type a short login (e.g. `dr_smith`) that becomes `dr_smith@your.domain`.
+ * Normalizes sign-in email (trim). Optional `VITE_AUTH_EMAIL_DOMAIN` maps a local part
+ * without `@` to `local@domain` (only if you use a plain text field; the login UI uses `type="email"`).
  */
 export function loginIdentifierToEmail(input: string): string {
   const trimmed = input.trim()

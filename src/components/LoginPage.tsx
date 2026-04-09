@@ -1,52 +1,41 @@
 import { type FormEvent, useState } from 'react'
+import { Info } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { loginIdentifierToEmail } from '@/lib/auth-email'
 import { supabase } from '@/lib/supabase'
 
+/** Maps Supabase OTP errors to reviewer-friendly copy (unknown email + shouldCreateUser: false). */
+function friendlyOtpError(message: string): string {
+  const lower = message.toLowerCase()
+  if (lower.includes('signups not allowed') || lower.includes('user not found')) {
+    return 'No account exists for this email. Your administrator must invite you or create your user in Supabase first.'
+  }
+  return message
+}
+
 export function LoginPage() {
-  const [mode, setMode] = useState<'password' | 'magiclink'>('password')
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
+  const [email, setEmail] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
-  async function handlePasswordSubmit(event: FormEvent) {
+  async function handleSubmit(event: FormEvent) {
     event.preventDefault()
     setError(null)
     setInfo(null)
     setIsSubmitting(true)
-    const email = loginIdentifierToEmail(username)
-    try {
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      })
-      if (signInError) {
-        setError(signInError.message)
-      }
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
-  async function handleMagicLinkSubmit(event: FormEvent) {
-    event.preventDefault()
-    setError(null)
-    setInfo(null)
-    setIsSubmitting(true)
-    const email = loginIdentifierToEmail(username)
+    const address = loginIdentifierToEmail(email)
     try {
       const { error: otpError } = await supabase.auth.signInWithOtp({
-        email,
+        email: address,
         options: {
           emailRedirectTo: `${window.location.origin}/`,
           shouldCreateUser: false,
         },
       })
       if (otpError) {
-        setError(otpError.message)
+        setError(friendlyOtpError(otpError.message))
       } else {
         setInfo('Check your email for the sign-in link. Open it on this device to continue.')
       }
@@ -65,106 +54,43 @@ export function LoginPage() {
           </p>
         </div>
 
-        <div className="flex gap-2 rounded-lg border bg-muted/40 p-1">
-          <button
-            type="button"
-            className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-              mode === 'password'
-                ? 'bg-background text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-            onClick={() => {
-              setMode('password')
-              setError(null)
-              setInfo(null)
-            }}
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          <div
+            role="note"
+            className="flex items-center justify-center gap-3 overflow-x-auto rounded-lg border border-amber-500/40 bg-amber-500/[0.09] px-3 py-2.5 dark:border-amber-400/35 dark:bg-amber-400/[0.1]"
           >
-            Password
-          </button>
-          <button
-            type="button"
-            className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-              mode === 'magiclink'
-                ? 'bg-background text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-            onClick={() => {
-              setMode('magiclink')
-              setError(null)
-              setInfo(null)
-            }}
-          >
-            Email link
-          </button>
-        </div>
-
-        {mode === 'password' ? (
-          <form className="space-y-4" onSubmit={handlePasswordSubmit}>
-            <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="login-username">
-                Email or username
-              </label>
-              <input
-                id="login-username"
-                name="username"
-                type="text"
-                autoComplete="username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                required
-                disabled={isSubmitting}
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="login-password">
-                Password
-              </label>
-              <input
-                id="login-password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                required
-                disabled={isSubmitting}
-              />
-            </div>
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
-            <Button type="submit" className="w-full" disabled={isSubmitting}>
-              {isSubmitting ? 'Signing in…' : 'Sign in'}
-            </Button>
-          </form>
-        ) : (
-          <form className="space-y-4" onSubmit={handleMagicLinkSubmit}>
-            <p className="text-sm text-muted-foreground">
-              We’ll email you a link to sign in. Use the same address as your invite or account.
+            <Info
+              className="h-5 w-5 shrink-0 text-amber-700 dark:text-amber-400"
+              aria-hidden
+            />
+            <p className="whitespace-nowrap text-sm font-medium leading-none text-foreground">
+              Use only the email you were invited with.
             </p>
-            <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="login-email-link">
-                Email or username
-              </label>
-              <input
-                id="login-email-link"
-                name="email"
-                type="text"
-                autoComplete="email"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                required
-                disabled={isSubmitting}
-              />
-            </div>
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
-            {info ? <p className="text-sm text-muted-foreground">{info}</p> : null}
-            <Button type="submit" className="w-full" disabled={isSubmitting}>
-              {isSubmitting ? 'Sending…' : 'Send sign-in link'}
-            </Button>
-          </form>
-        )}
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium" htmlFor="login-email">
+              Email
+            </label>
+            <input
+              id="login-email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              inputMode="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              placeholder="you@clinic.org"
+              required
+              disabled={isSubmitting}
+            />
+          </div>
+          {error ? <p className="text-sm text-destructive">{error}</p> : null}
+          {info ? <p className="text-sm text-muted-foreground">{info}</p> : null}
+          <Button type="submit" className="w-full" disabled={isSubmitting}>
+            {isSubmitting ? 'Sending…' : 'Send sign-in link'}
+          </Button>
+        </form>
       </div>
     </main>
   )
