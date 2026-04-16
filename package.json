@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "seed:cases": "node ./scripts/seed-cases.mjs"
+    "seed:cases": "node ./scripts/seed-cases.mjs",
+    "clean:cases": "node ./scripts/clean-cases.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
